@@ -402,6 +402,36 @@ auth_reply(struct context *ctx, struct conn *conn, struct msg *smsg, const char 
     TAILQ_INSERT_TAIL(&conn->omsg_q, smsg, c_tqe);
 }
 
+static void
+select_reply(struct context *ctx, struct conn *conn, struct msg *smsg, const char *usr_msg)
+{
+    int n;
+    struct mbuf *mbuf;
+    struct msg *msg = msg_get(conn, false, __FUNCTION__);
+    if (msg == NULL) {
+        return;
+    }
+
+    mbuf = get_mbuf(msg);
+    if (mbuf == NULL) {
+        msg_put(msg);
+        return;
+    }
+
+    smsg->peer = msg;
+    smsg->selected_rsp = msg;
+    msg->peer = smsg;
+
+    n = (int)strlen(usr_msg);
+    memcpy(mbuf->last, usr_msg, (size_t)n);
+    mbuf->last += n;
+    msg->mlen += (uint32_t)n;
+    msg->done = 1;
+
+    conn_event_add_out(conn);
+    TAILQ_INSERT_TAIL(&conn->omsg_q, smsg, c_tqe);
+}
+
 static int
 get_password(unsigned char *string, unsigned int len, char *passwd, uint32_t *passwd_len)
 {
@@ -461,6 +491,72 @@ get_password(unsigned char *string, unsigned int len, char *passwd, uint32_t *pa
     return 0;
 }
 
+static int
+get_select_index(unsigned char *string, unsigned int len, int *index)
+{
+    char *p;
+    char *pos;
+    char buff[128];
+    int cmdlen, nargc;
+    size_t l;
+
+    p = (char *)string;
+    if (p[0] != '*') {
+        return -1;
+    }
+
+    /* deal with nargc */
+    pos = strstr(p + 1, CRLF);
+    if (!pos) return -1;
+    l = pos - (p + 1);
+    memcpy(buff, p + 1, l);
+    buff[l] = '\0';
+    nargc = atoi(buff);
+    if (nargc != 2) return -1;
+
+    /* deal with cmd */
+    p = pos + 2;
+    if (*p != '$') return -1;
+    pos = strstr(p + 1, CRLF);
+    if (!pos) return -1;
+    l = pos - (p + 1);
+    memcpy(buff, p + 1, l);
+    buff[l] = '\0';
+    cmdlen = atoi(buff);
+    p = pos + 2;
+    pos = strstr(p, CRLF);
+    if (!pos) return -1;
+    l = pos - p;
+    if (l != cmdlen) return -1;
+    memcpy(buff, p, l);
+    buff[l] = '\0';
+    if (strcasecmp("SELECT", buff) != 0) return -1;
+
+    /* password */
+    p = pos + 2;
+    if (*p != '$') return -1;
+    pos = strstr(p + 1, CRLF);
+    if (!pos) return -1;
+    l = pos - (p + 1);
+    memcpy(buff, p + 1, l);
+    buff[l] = '\0';
+    int select_index_len = atoi(buff);
+    p = pos + 2;
+    pos = strstr(p, CRLF);
+    if (!pos) return -1;
+    l = pos - p;
+    memcpy(buff, p, l);
+    buff[l] = '\0';
+    char* end;
+    *index = strtol(buff,&end,10);
+    if( end != buff + strlen(buff) )
+    {
+        //invalid number
+        return -2;
+    }
+    return 0;
+}
+
 
 static bool
 req_filter(struct context *ctx, struct conn *conn, struct msg *req)
@@ -475,6 +571,34 @@ req_filter(struct context *ctx, struct conn *conn, struct msg *req)
         req_put(req);
         return true;
     }
+
+    /*
+     * Handle "SELECT index\r\n"
+     */
+    if(req->type == MSG_REQ_REDIS_SELECT) {
+        int index = 0;
+        int result = get_select_index(req->mhdr.stqh_first->start, req->mlen, &index);
+        switch(result)
+        {
+        case -2:
+            select_reply(ctx, conn, req, "-ERR invalid DB index\r\n");
+            break;
+        case 0:
+            if(index != 0) {
+                select_reply(ctx, conn, req, "-ERR SELECT is not allowed in cluster mode\r\n");
+            } else {
+                select_reply(ctx, conn, req, "+OK\r\n");
+            }
+            break;
+        case -1:
+        default:
+            select_reply(ctx, conn, req, "-ERR Unknown command\r\n");
+            break;
+        }
+
+        return true;
+    }
+
 
     /*
      * Handle "AUTH requirepass\r\n"

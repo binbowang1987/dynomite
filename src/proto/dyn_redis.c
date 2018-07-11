@@ -93,6 +93,7 @@ redis_arg0(struct msg *r)
     case MSG_REQ_REDIS_KEYS:
     case MSG_REQ_REDIS_PFCOUNT:
     case MSG_REQ_REDIS_AUTH:
+    case MSG_REQ_REDIS_SELECT:
         return true;
 
     default:
@@ -889,6 +890,12 @@ redis_parse_req(struct msg *r, const struct string *hash_tag)
                 break;
 
             case 6:
+                if (str6icmp(m, 's', 'e', 'l', 'e', 'c', 't')) {
+                    r->type = MSG_REQ_REDIS_SELECT;
+                    r->is_read = 0;
+                    break;
+                }
+
                 if (str6icmp(m, 'a', 'p', 'p', 'e', 'n', 'd')) {
                     r->type = MSG_REQ_REDIS_APPEND;
                     r->is_read = 0;
